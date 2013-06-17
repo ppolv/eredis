@@ -18,6 +18,8 @@
 -export([start_link/0, start_link/1, start_link/2, start_link/3, start_link/4,
          start_link/5, stop/1, q/2, q/3, qp/2, qp/3, q_noreply/2]).
 
+-export([prepare_pipeline/1, run_pipeline/3, run_pipeline/4]).
+
 %% Exported for testing
 -export([create_multibulk/1]).
 
@@ -101,10 +103,37 @@ call(Client, Command, Timeout) ->
     Request = {request, create_multibulk(Command)},
     gen_server:call(Client, Request, Timeout).
 
+%% Template is [iolist() | '$'] . '$' are placeholders to be completed
+%% in run_pipeline/3
+prepare_pipeline(Template) ->
+        ArgCount = [<<$*>>, integer_to_list(length(Template)), <<?NL>>],
+	{pipeline_template, ArgCount, 
+		lists:map(fun('$') -> '$';
+		 	     (CommandArg) -> to_bulk(to_binary(CommandArg))
+		end, Template)}.
+
+run_pipeline(Client, Template, ArgsList) ->
+	run_pipeline(Client, Template, ArgsList, ?TIMEOUT).
+run_pipeline(Client, {pipeline_template, ArgCount, Template}, ArgsList, Timeout) ->
+	BulkPipeline = lists:map(fun(Args) ->
+				{ArgsBin,[]} = lists:foldl(fun('$', {Accum, [A|Rest]}) -> 
+							{[to_bulk(to_binary(A))|Accum], Rest};
+					        (B, {Accum,AArgs}) ->
+							{[B|Accum], AArgs}
+					end, {[], Args}, Template),
+				[ArgCount, lists:reverse(ArgsBin)]
+		end, ArgsList),
+    Request = {pipeline, BulkPipeline},
+    gen_server:call(Client, Request, Timeout).
+
+
+
+
 pipeline(_Client, [], _Timeout) ->
     [];
 pipeline(Client, Pipeline, Timeout) ->
     Request = {pipeline, [create_multibulk(Command) || Command <- Pipeline]},
+%    io:format("Sending pipeline: ~p\n", [Request]),
     gen_server:call(Client, Request, Timeout).
 
 cast(Client, Command) ->

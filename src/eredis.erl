@@ -23,6 +23,9 @@
 %% Exported for testing
 -export([create_multibulk/1]).
 
+
+
+
 %%
 %% PUBLIC API
 %%
@@ -112,21 +115,25 @@ prepare_pipeline(Template) ->
 		 	     (CommandArg) -> to_bulk(to_binary(CommandArg))
 		end, Template)}.
 
+
+%% ArgList must already be a [[iolist()]]  (there is no explicit convertion to binary)
 run_pipeline(Client, Template, ArgsList) ->
 	run_pipeline(Client, Template, ArgsList, ?TIMEOUT).
-run_pipeline(Client, {pipeline_template, ArgCount, Template}, ArgsList, Timeout) ->
-	BulkPipeline = lists:map(fun(Args) ->
-				{ArgsBin,[]} = lists:foldl(fun('$', {Accum, [A|Rest]}) -> 
-							{[to_bulk(to_binary(A))|Accum], Rest};
-					        (B, {Accum,AArgs}) ->
-							{[B|Accum], AArgs}
-					end, {[], Args}, Template),
-				[ArgCount, lists:reverse(ArgsBin)]
-		end, ArgsList),
+run_pipeline(Client, PipelineTemplate, ArgsList, Timeout) ->
+    BulkPipeline = build_pipeline(PipelineTemplate, ArgsList),
     Request = {pipeline, BulkPipeline},
     gen_server:call(Client, Request, Timeout).
 
+build_pipeline({pipeline_template, ArgCount, Template}, ArgsList) ->
+	lists:map(fun(Args) ->
+                [ArgCount, inflate_template(Template, Args)]
+		end, ArgsList).
 
+inflate_template([], []) -> [];
+inflate_template(['$'|Template], [Val|Args]) ->
+    [to_bulk(Val) | inflate_template(Template, Args)];
+inflate_template([B|Template], Args) ->
+    [B | inflate_template(Template, Args)].
 
 
 pipeline(_Client, [], _Timeout) ->
@@ -148,7 +155,8 @@ create_multibulk(Args) ->
 
     [ArgCount, ArgsBin].
 
-to_bulk(B) when is_binary(B) ->
+%% acept iolist()
+to_bulk(B) ->
     [<<$$>>, integer_to_list(iolist_size(B)), <<?NL>>, B, <<?NL>>].
 
 %% @doc: Convert given value to binary. Fallbacks to

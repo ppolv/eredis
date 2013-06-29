@@ -119,6 +119,8 @@ prepare_pipeline(Template) ->
 %% ArgList must already be a [[iolist()]]  (there is no explicit convertion to binary)
 run_pipeline(Client, Template, ArgsList) ->
 	run_pipeline(Client, Template, ArgsList, ?TIMEOUT).
+run_pipeline(_Client, _PipelineTemplate, [], _Timeout) ->
+    [];
 run_pipeline(Client, PipelineTemplate, ArgsList, Timeout) ->
     BulkPipeline = build_pipeline(PipelineTemplate, ArgsList),
     Request = {pipeline, BulkPipeline},

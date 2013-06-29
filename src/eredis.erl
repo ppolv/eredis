@@ -25,7 +25,6 @@
 
 
 
-
 %%
 %% PUBLIC API
 %%
@@ -109,11 +108,15 @@ call(Client, Command, Timeout) ->
 %% Template is [iolist() | '$'] . '$' are placeholders to be completed
 %% in run_pipeline/3
 prepare_pipeline(Template) ->
-        ArgCount = [<<$*>>, integer_to_list(length(Template)), <<?NL>>],
-	{pipeline_template, ArgCount, 
-		lists:map(fun('$') -> '$';
-		 	     (CommandArg) -> to_bulk(to_binary(CommandArg))
-		end, Template)}.
+    ArgCount = [<<$*>>, integer_to_list(length(Template)), <<?NL>>],
+    PreparedTemplate = {template, ArgCount, 
+        lists:map(fun('$') -> '$';
+                (CommandArg) -> to_bulk(to_binary(CommandArg))
+        end, Template)},
+    Expander = fun(ArgsList) ->
+            build_pipeline(PreparedTemplate, ArgsList)
+    end,
+    {pipeline_template, Expander}.
 
 
 %% ArgList must already be a [[iolist()]]  (there is no explicit convertion to binary)
@@ -122,11 +125,10 @@ run_pipeline(Client, Template, ArgsList) ->
 run_pipeline(_Client, _PipelineTemplate, [], _Timeout) ->
     [];
 run_pipeline(Client, PipelineTemplate, ArgsList, Timeout) ->
-    BulkPipeline = build_pipeline(PipelineTemplate, ArgsList),
-    Request = {pipeline, BulkPipeline},
+    Request = {run_pipeline,PipelineTemplate, ArgsList},
     gen_server:call(Client, Request, Timeout).
 
-build_pipeline({pipeline_template, ArgCount, Template}, ArgsList) ->
+build_pipeline({template, ArgCount, Template}, ArgsList) ->
 	lists:map(fun(Args) ->
                 [ArgCount, inflate_template(Template, Args)]
 		end, ArgsList).

@@ -87,6 +87,9 @@ init([Host, Port, Database, Password, ReconnectSleep]) ->
 handle_call({request, Req}, From, State) ->
     do_request(Req, From, State);
 
+handle_call({run_pipeline, {pipeline_template, Template}, Vals}, From, State) ->
+    Pipeline = Template(Vals),
+    do_pipeline(Pipeline, From, State);
 handle_call({pipeline, Pipeline}, From, State) ->
     do_pipeline(Pipeline, From, State);
 

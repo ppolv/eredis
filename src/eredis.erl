@@ -144,7 +144,6 @@ pipeline(_Client, [], _Timeout) ->
     [];
 pipeline(Client, Pipeline, Timeout) ->
     Request = {pipeline, [create_multibulk(Command) || Command <- Pipeline]},
-%    io:format("Sending pipeline: ~p\n", [Request]),
     gen_server:call(Client, Request, Timeout).
 
 cast(Client, Command) ->

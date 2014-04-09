@@ -111,7 +111,7 @@ prepare_pipeline(Template) ->
     ArgCount = [<<$*>>, integer_to_list(length(Template)), <<?NL>>],
     PreparedTemplate = {template, ArgCount, 
         lists:map(fun('$') -> '$';
-                (CommandArg) -> to_bulk(to_binary(CommandArg))
+                (CommandArg) -> to_bulk(to_iolist(CommandArg))
         end, Template)},
     Expander = fun(ArgsList) ->
             build_pipeline(PreparedTemplate, ArgsList)
@@ -154,7 +154,7 @@ cast(Client, Command) ->
 %% @doc: Creates a multibulk command with all the correct size headers
 create_multibulk(Args) ->
     ArgCount = [<<$*>>, integer_to_list(length(Args)), <<?NL>>],
-    ArgsBin = lists:map(fun to_bulk/1, lists:map(fun to_binary/1, Args)),
+    ArgsBin = lists:map(fun to_bulk/1, lists:map(fun to_iolist/1, Args)),
 
     [ArgCount, ArgsBin].
 
@@ -166,9 +166,8 @@ to_bulk(B) ->
 %% term_to_binary/1. For floats, throws {cannot_store_floats, Float}
 %% as we do not want floats to be stored in Redis. Your future self
 %% will thank you for this.
-to_binary(X) when is_list(X)    -> list_to_binary(X);
-to_binary(X) when is_atom(X)    -> list_to_binary(atom_to_list(X));
-to_binary(X) when is_binary(X)  -> X;
-to_binary(X) when is_integer(X) -> list_to_binary(integer_to_list(X));
-to_binary(X) when is_float(X)   -> throw({cannot_store_floats, X});
-to_binary(X)                    -> term_to_binary(X).
+to_iolist(X) when is_binary(X) orelse is_list(X) -> X;
+to_iolist(X) when is_atom(X)    -> list_to_binary(atom_to_list(X));
+to_iolist(X) when is_integer(X) -> list_to_binary(integer_to_list(X));
+to_iolist(X) when is_float(X)   -> throw({cannot_store_floats, X});
+to_iolist(X)                    -> term_to_binary(X).

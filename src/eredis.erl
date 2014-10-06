@@ -7,8 +7,6 @@
 %%   {ok, <<"bar">>} = eredis:q(["GET", "foo"]).
 
 -module(eredis).
--author('knut.nesheim@wooga.com').
-
 -include("eredis.hrl").
 
 %% Default timeout for calls to the client gen_server
@@ -16,14 +14,19 @@
 -define(TIMEOUT, 5000).
 
 -export([start_link/0, start_link/1, start_link/2, start_link/3, start_link/4,
-         start_link/5, stop/1, q/2, q/3, qp/2, qp/3, q_noreply/2]).
+         start_link/5, start_link/6, stop/1, q/2, q/3, qp/2, qp/3, q_noreply/2]).
 
 -export([prepare_pipeline/1, run_pipeline/3, run_pipeline/4]).
 
 %% Exported for testing
 -export([create_multibulk/1]).
 
-
+%% Type of gen_server process id
+-type client() :: pid() |
+                  atom() |
+                  {atom(),atom()} |
+                  {global,term()} |
+                  {via,atom(),term()}.
 
 %%
 %% PUBLIC API
@@ -38,18 +41,22 @@ start_link(Host, Port) ->
 start_link(Host, Port, Database) ->
     start_link(Host, Port, Database, "").
 
-start_link(Host, Port,  Database, Password) ->
+start_link(Host, Port, Database, Password) ->
     start_link(Host, Port, Database, Password, 100).
 
-start_link(Host, Port, Database, Password, ReconnectSleep)
+start_link(Host, Port, Database, Password, ReconnectSleep) ->
+    start_link(Host, Port, Database, Password, ReconnectSleep, ?TIMEOUT).
+
+start_link(Host, Port, Database, Password, ReconnectSleep, ConnectTimeout)
   when is_list(Host),
        is_integer(Port),
        is_integer(Database) orelse Database == undefined,
        is_list(Password),
-       is_integer(ReconnectSleep) orelse ReconnectSleep =:= no_reconnect ->
+       is_integer(ReconnectSleep) orelse ReconnectSleep =:= no_reconnect,
+       is_integer(ConnectTimeout) ->
 
-    eredis_client:start_link(Host, Port, Database, Password, ReconnectSleep).
-
+    eredis_client:start_link(Host, Port, Database, Password,
+                             ReconnectSleep, ConnectTimeout).
 
 %% @doc: Callback for starting from poolboy
 -spec start_link(server_args()) -> {ok, Pid::pid()} | {error, Reason::term()}.
@@ -59,12 +66,13 @@ start_link(Args) ->
     Database       = proplists:get_value(database, Args, 0),
     Password       = proplists:get_value(password, Args, ""),
     ReconnectSleep = proplists:get_value(reconnect_sleep, Args, 100),
-    start_link(Host, Port, Database, Password, ReconnectSleep).
+    ConnectTimeout = proplists:get_value(connect_timeout, Args, ?TIMEOUT),
+    start_link(Host, Port, Database, Password, ReconnectSleep, ConnectTimeout).
 
 stop(Client) ->
     eredis_client:stop(Client).
 
--spec q(Client::pid(), Command::iolist()) ->
+-spec q(Client::client(), Command::iolist()) ->
                {ok, return_value()} | {error, Reason::binary() | no_connection}.
 %% @doc: Executes the given command in the specified connection. The
 %% command must be a valid Redis command and may contain arbitrary
@@ -77,7 +85,7 @@ q(Client, Command, Timeout) ->
     call(Client, Command, Timeout).
 
 
--spec qp(Client::pid(), Pipeline::pipeline()) ->
+-spec qp(Client::client(), Pipeline::pipeline()) ->
                 [{ok, return_value()} | {error, Reason::binary()}] |
                 {error, no_connection}.
 %% @doc: Executes the given pipeline (list of commands) in the
@@ -90,7 +98,7 @@ qp(Client, Pipeline) ->
 qp(Client, Pipeline, Timeout) ->
     pipeline(Client, Pipeline, Timeout).
 
--spec q_noreply(Client::pid(), Command::iolist()) -> ok.
+-spec q_noreply(Client::client(), Command::iolist()) -> ok.
 %% @doc
 %% @see q/2
 %% Executes the command but does not wait for a response and ignores any errors.

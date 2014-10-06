@@ -2,8 +2,6 @@
 %% Erlang PubSub Redis client
 %%
 -module(eredis_sub).
--author('knut.nesheim@wooga.com').
-
 -include("eredis.hrl").
 
 %% Default timeout for calls to the client gen_server
@@ -67,6 +65,9 @@ stop(Pid) ->
 %%
 %%   {message, Channel::binary(), Message::binary(), pid()}
 %%     This is sent for each pubsub message received by the client.
+%%
+%%   {pmessage, Pattern::binary(), Channel::binary(), Message::binary(), pid()}
+%%     This is sent for each pattern pubsub message received by the client.
 %%
 %%   {dropped, NumMessages::integer(), pid()}
 %%     If the queue reaches the max size as specified in start_link

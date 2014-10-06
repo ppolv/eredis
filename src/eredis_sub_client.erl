@@ -8,8 +8,6 @@
 %%
 %% There is one consuming process per eredis_sub_client.
 -module(eredis_sub_client).
--author('knut.nesheim@wooga.com').
-
 -behaviour(gen_server).
 -include("eredis.hrl").
 -include("eredis_sub.hrl").
@@ -58,7 +56,7 @@ init([Host, Port, Password, ReconnectSleep, MaxQueueSize, QueueBehaviour]) ->
 
     case connect(State) of
         {ok, NewState} ->
-            inet:setopts(NewState#state.socket, [{active, once}]),
+            ok = inet:setopts(NewState#state.socket, [{active, once}]),
             {ok, NewState};
         {error, Reason} ->
             {stop, {connection_error, Reason}}
@@ -110,21 +108,22 @@ handle_cast({ack_message, Pid},
 handle_cast({subscribe, Pid, Channels}, #state{controlling_process = {_, Pid}} = State) ->
     Command = eredis:create_multibulk(["SUBSCRIBE" | Channels]),
     ok = gen_tcp:send(State#state.socket, Command),
-    {noreply, State#state{channels = Channels ++ State#state.channels}};
+    NewChannels = add_channels(Channels, State#state.channels),
+    {noreply, State#state{channels = NewChannels}};
 
 
 handle_cast({psubscribe, Pid, Channels}, #state{controlling_process = {_, Pid}} = State) ->
     Command = eredis:create_multibulk(["PSUBSCRIBE" | Channels]),
     ok = gen_tcp:send(State#state.socket, Command),
-    {noreply, State#state{channels = Channels ++ State#state.channels}};
+    NewChannels = add_channels(Channels, State#state.channels),
+    {noreply, State#state{channels = NewChannels}};
 
 
 
 handle_cast({unsubscribe, Pid, Channels}, #state{controlling_process = {_, Pid}} = State) ->
     Command = eredis:create_multibulk(["UNSUBSCRIBE" | Channels]),
     ok = gen_tcp:send(State#state.socket, Command),
-    NewChannels = lists:foldl(fun (C, Cs) -> lists:delete(C, Cs) end,
-                              State#state.channels, Channels),
+    NewChannels = remove_channels(Channels, State#state.channels),
     {noreply, State#state{channels = NewChannels}};
 
 
@@ -132,8 +131,7 @@ handle_cast({unsubscribe, Pid, Channels}, #state{controlling_process = {_, Pid}}
 handle_cast({punsubscribe, Pid, Channels}, #state{controlling_process = {_, Pid}} = State) ->
     Command = eredis:create_multibulk(["PUNSUBSCRIBE" | Channels]),
     ok = gen_tcp:send(State#state.socket, Command),
-    NewChannels = lists:foldl(fun (C, Cs) -> lists:delete(C, Cs) end,
-                              State#state.channels, Channels),
+    NewChannels = remove_channels(Channels, State#state.channels),
     {noreply, State#state{channels = NewChannels}};
 
 
@@ -147,7 +145,8 @@ handle_cast(_Msg, State) ->
 
 %% Receive data from socket, see handle_response/2
 handle_info({tcp, _Socket, Bs}, State) ->
-    inet:setopts(State#state.socket, [{active, once}]),
+    ok = inet:setopts(State#state.socket, [{active, once}]),
+
     NewState = handle_response(Bs, State),
     case queue:len(NewState#state.msg_queue) > NewState#state.max_queue_size of
         true ->
@@ -188,8 +187,9 @@ handle_info({tcp_closed, _Socket}, State) ->
 %% already connected and authenticated.
 handle_info({connection_ready, Socket}, #state{socket = undefined} = State) ->
     send_to_controller({eredis_connected, self()}, State),
-    inet:setopts(Socket, [{active, once}]),
+    ok = inet:setopts(Socket, [{active, once}]),
     {noreply, State#state{socket = Socket}};
+
 
 %% Our controlling process is down.
 handle_info({'DOWN', Ref, process, Pid, _Reason},
@@ -219,6 +219,21 @@ code_change(_OldVsn, State, _Extra) ->
 %%--------------------------------------------------------------------
 %%% Internal functions
 %%--------------------------------------------------------------------
+
+-spec remove_channels([binary()], [binary()]) -> [binary()].
+remove_channels(Channels, OldChannels) ->
+    lists:foldl(fun lists:delete/2, OldChannels, Channels).
+
+-spec add_channels([binary()], [binary()]) -> [binary()].
+add_channels(Channels, OldChannels) ->
+    lists:foldl(fun(C, Cs) ->
+        case lists:member(C, Cs) of
+            true ->
+                Cs;
+            false ->
+                [C|Cs]
+        end
+    end, OldChannels, Channels).
 
 -spec handle_response(Data::binary(), State::#state{}) -> NewState::#state{}.
 %% @doc: Handle the response coming from Redis. This should only be
@@ -282,11 +297,10 @@ queue_or_send(Msg, State) ->
 
 %% @doc: Helper for connecting to Redis. These commands are
 %% synchronous and if Redis returns something we don't expect, we
-%% crash. Returns {ok, State} or {SomeError, Reason}.
+%% crash. Returns {ok, State} or {error, Reason}.
 connect(State) ->
     case gen_tcp:connect(State#state.host, State#state.port, ?SOCKET_OPTS) of
         {ok, Socket} ->
-            inet:setopts(Socket, [{active, false}]),
             case authenticate(Socket, State#state.password) of
                 ok ->
                     {ok, State#state{socket = Socket}};

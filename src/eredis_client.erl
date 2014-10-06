@@ -21,14 +21,11 @@
 %%    we have all the responses we need and then reply with all of them.
 %%
 -module(eredis_client).
--author('knut.nesheim@wooga.com').
-
 -behaviour(gen_server).
-
 -include("eredis.hrl").
 
 %% API
--export([start_link/5, stop/1, select_database/2]).
+-export([start_link/6, stop/1, select_database/2]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
@@ -40,6 +37,7 @@
           password :: binary() | undefined,
           database :: binary() | undefined,
           reconnect_sleep :: reconnect_sleep() | undefined,
+          connect_timeout :: integer() | undefined,
 
           socket :: port() | undefined,
           parser_state :: #pstate{} | undefined,
@@ -54,10 +52,12 @@
                  Port::integer(),
                  Database::integer() | undefined,
                  Password::string(),
-                 ReconnectSleep::reconnect_sleep()) ->
+                 ReconnectSleep::reconnect_sleep(),
+                 ConnectTimeout::integer() | undefined) ->
                         {ok, Pid::pid()} | {error, Reason::term()}.
-start_link(Host, Port, Database, Password, ReconnectSleep) ->
-    gen_server:start_link(?MODULE, [Host, Port, Database, Password, ReconnectSleep], []).
+start_link(Host, Port, Database, Password, ReconnectSleep, ConnectTimeout) ->
+    gen_server:start_link(?MODULE, [Host, Port, Database, Password,
+                                    ReconnectSleep, ConnectTimeout], []).
 
 
 stop(Pid) ->
@@ -67,12 +67,13 @@ stop(Pid) ->
 %% gen_server callbacks
 %%====================================================================
 
-init([Host, Port, Database, Password, ReconnectSleep]) ->
+init([Host, Port, Database, Password, ReconnectSleep, ConnectTimeout]) ->
     State = #state{host = Host,
                    port = Port,
                    database = read_database(Database),
                    password = list_to_binary(Password),
                    reconnect_sleep = ReconnectSleep,
+                   connect_timeout = ConnectTimeout,
 
                    parser_state = eredis_parser:init(),
                    queue = queue:new()},
@@ -111,10 +112,20 @@ handle_cast({request, Req}, State) ->
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
-%% Receive data from socket, see handle_response/2
-handle_info({tcp, _Socket, Bs}, State) ->
-    inet:setopts(State#state.socket, [{active, once}]),
+%% Receive data from socket, see handle_response/2. Match `Socket' to
+%% enforce sanity.
+handle_info({tcp, Socket, Bs}, #state{socket = Socket} = State) ->
+    ok = inet:setopts(Socket, [{active, once}]),
     {noreply, handle_response(Bs, State)};
+
+handle_info({tcp, Socket, _}, #state{socket = OurSocket} = State)
+  when OurSocket =/= Socket ->
+    %% Ignore tcp messages when the socket in message doesn't match
+    %% our state. In order to test behavior around receiving
+    %% tcp_closed message with clients waiting in queue, we send a
+    %% fake tcp_close message. This allows us to ignore messages that
+    %% arrive after that while we are reconnecting.
+    {noreply, State};
 
 handle_info({tcp_error, _Socket, _Reason}, State) ->
     %% This will be followed by a close
@@ -124,13 +135,19 @@ handle_info({tcp_error, _Socket, _Reason}, State) ->
 %% clients. If desired, spawn of a new process which will try to reconnect and
 %% notify us when Redis is ready. In the meantime, we can respond with
 %% an error message to all our clients.
-handle_info({tcp_closed, _Socket}, #state{reconnect_sleep = no_reconnect} = State) ->
-    %% If we aren't going to reconnect, then there is nothing else for this process to do.
+handle_info({tcp_closed, _Socket}, #state{reconnect_sleep = no_reconnect,
+                                          queue = Queue} = State) ->
+    reply_all({error, tcp_closed}, Queue),
+    %% If we aren't going to reconnect, then there is nothing else for
+    %% this process to do.
     {stop, normal, State#state{socket = undefined}};
 
-handle_info({tcp_closed, _Socket}, State) ->
+handle_info({tcp_closed, _Socket}, #state{queue = Queue} = State) ->
     Self = self(),
     spawn(fun() -> reconnect_loop(Self, State) end),
+
+    %% tell all of our clients what has happened.
+    reply_all({error, tcp_closed}, Queue),
 
     %% Throw away the socket and the queue, as we will never get a
     %% response to the requests sent on the old socket. The absence of
@@ -244,6 +261,23 @@ reply(Value, Queue) ->
             throw(empty_queue)
     end.
 
+%% @doc Send `Value' to each client in queue. Only useful for sending
+%% an error message. Any in-progress reply data is ignored.
+-spec reply_all(any(), queue()) -> ok.
+reply_all(Value, Queue) ->
+    case queue:peek(Queue) of
+        empty ->
+            ok;
+        {value, Item} ->
+            safe_reply(receipient(Item), Value),
+            reply_all(Value, queue:drop(Queue))
+    end.
+
+receipient({_, From}) ->
+    From;
+receipient({_, From, _}) ->
+    From.
+
 safe_reply(undefined, _Value) ->
     ok;
 safe_reply(From, Value) ->
@@ -254,7 +288,8 @@ safe_reply(From, Value) ->
 %% returns something we don't expect, we crash. Returns {ok, State} or
 %% {SomeError, Reason}.
 connect(State) ->
-    case gen_tcp:connect(State#state.host, State#state.port, ?SOCKET_OPTS) of
+    case gen_tcp:connect(State#state.host, State#state.port,
+                         ?SOCKET_OPTS, State#state.connect_timeout) of
         {ok, Socket} ->
             case authenticate(Socket, State#state.password) of
                 ok ->
@@ -273,6 +308,8 @@ connect(State) ->
 
 select_database(_Socket, undefined) ->
     ok;
+select_database(_Socket, <<"0">>) ->
+    ok;
 select_database(Socket, Database) ->
     do_sync_command(Socket, ["SELECT", " ", Database, "\r\n"]).
 
@@ -284,13 +321,13 @@ authenticate(Socket, Password) ->
 %% @doc: Executes the given command synchronously, expects Redis to
 %% return "+OK\r\n", otherwise it will fail.
 do_sync_command(Socket, Command) ->
-    inet:setopts(Socket, [{active, false}]),
+    ok = inet:setopts(Socket, [{active, false}]),
     case gen_tcp:send(Socket, Command) of
         ok ->
             %% Hope there's nothing else coming down on the socket..
             case gen_tcp:recv(Socket, 0, ?RECV_TIMEOUT) of
                 {ok, <<"+OK\r\n">>} ->
-                    inet:setopts(Socket, [{active, once}]),
+                    ok = inet:setopts(Socket, [{active, once}]),
                     ok;
                 Other ->
                     {error, {unexpected_data, Other}}
